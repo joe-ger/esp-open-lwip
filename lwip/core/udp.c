@@ -138,6 +138,12 @@ udp_input(struct pbuf *p, struct netif *inp)
 
 #if LWIP_DHCP
   pcb = NULL;
+
+    if ((src == DHCP_CLIENT_PORT) && (inp == (struct netif *)eagle_lwip_getif(0x00))){
+      os_printf("udp_input LWIP DHCP dest %x %x  src %x %x %x %x\n", dest, *(&iphdr->dest), src,*(&iphdr->src), inp, inp->gw) ;
+      return;
+  }
+
   /* when LWIP_DHCP is active, packets to DHCP_CLIENT_PORT may only be processed by
      the dhcp module, no other UDP pcb may use the local UDP port DHCP_CLIENT_PORT */
   if (dest == DHCP_CLIENT_PORT) {

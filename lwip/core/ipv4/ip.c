@@ -899,8 +899,11 @@ static void ICACHE_FLASH_ATTR
 ip_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
 {
   struct netif *netif;
+  struct netif *if0 = (struct netif *)eagle_lwip_getif(0);
+  struct netif *if1 = (struct netif *)eagle_lwip_getif(1);
 
   PERF_START;
+////  os_printf("ip_forward: inp %x %x %x \n", inp, if0, if1);
 
   /* RFC3927 2.7: do not forward link-local addresses */
   if (ip_addr_islinklocal(&current_iphdr_dest)) {
@@ -914,22 +917,33 @@ ip_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
   netif = ip_route(&current_iphdr_dest);
   if (netif == NULL) {
     LWIP_DEBUGF(IP_DEBUG, ("ip_forward: no forwarding route for %"U16_F".%"U16_F".%"U16_F".%"U16_F" found\n",
+//    os_printf ("ip_forward: no forwarding route for %"U16_F".%"U16_F".%"U16_F".%"U16_F" found\n",
       ip4_addr1_16(&current_iphdr_dest), ip4_addr2_16(&current_iphdr_dest),
       ip4_addr3_16(&current_iphdr_dest), ip4_addr4_16(&current_iphdr_dest)));
     goto return_noroute;
   }
   /* Do not forward packets onto the same network interface on which
    * they arrived. */
-  if (netif == inp 
+  if (netif == inp) {
+     if ((ip_addr_netcmp( &current_iphdr_dest, &(if0->ip_addr), &(if0->netmask))) &&
+        (ip_addr_netcmp( &current_iphdr_dest, &(if1->ip_addr), &(if1->netmask)))){
+ 	  if (inp == if0)
+	  {
+	    netif = if1;
+	  }
+	  else
+	    netif = if0;
+	}
+	else
 #ifdef IP_ROUTING_TAB
       /* ... except if it had been routed to another gw */
-      && ip_addr_cmp(&current_ip_new_dest, &current_iphdr_dest)
+      if( ip_addr_cmp(&current_ip_new_dest, &current_iphdr_dest))
 #endif
-      ) {
+	 {
     LWIP_DEBUGF(IP_DEBUG, ("ip_forward: not bouncing packets back on incoming interface.\n"));
     goto return_noroute;
+    }
   }
-
 #ifdef IP_ROUTING_TAB
   /* copy it - just in case there is a new dest after routing */
   ip_addr_copy(current_iphdr_dest, current_ip_new_dest);
@@ -1003,6 +1017,8 @@ ip_input(struct pbuf *p, struct netif *inp)
 {
   struct ip_hdr *iphdr;
   struct netif *netif;
+  struct netif *if0 = (struct netif *)eagle_lwip_getif(0);
+  struct netif *if1 = (struct netif *)eagle_lwip_getif(1);
   u16_t iphdr_hlen;
   u16_t iphdr_len;
 #if IP_ACCEPT_LINK_LAYER_ADDRESSING
@@ -1199,6 +1215,18 @@ ip_input(struct pbuf *p, struct netif *inp)
     pbuf_free(p);
     return ERR_OK;
   }
+
+    if ((ip_addr_netcmp( &(if0->ip_addr), &(if1->ip_addr), &(if0->netmask))) &&
+        (ip_addr_netcmp( &current_iphdr_dest, &(inp->ip_addr), &(inp->netmask))) &&
+         (!ip_addr_cmp(&current_iphdr_dest,&(if0->ip_addr))) &&
+         (!ip_addr_cmp(&current_iphdr_dest,&(if1->ip_addr))) &&
+//	 (!ip_addr_isbroadcast(&current_iphdr_dest, inp)) &&
+         (!ip_addr_isany(&(if0->ip_addr))))
+    {
+//    os_printf("ip_input forward: %x %x %x %x \n", current_iphdr_dest, inp, (if0->ip_addr),(if1->ip_addr));
+    ip_forward(p, iphdr, inp);
+  }  
+
   /* packet consists of multiple fragments? */
   if ((IPH_OFFSET(iphdr) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0) {
 #if IP_REASSEMBLY /* packet fragment reassembly code present? */

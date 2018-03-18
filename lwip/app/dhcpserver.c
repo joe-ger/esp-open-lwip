@@ -22,6 +22,7 @@ static const char mem_debug_file[] ICACHE_RODATA_ATTR = __FILE__;
 //static u8_t old_xid[4] = {0};
 static const uint32 magic_cookie ICACHE_RODATA_ATTR = 0x63538263;
 static struct udp_pcb *pcb_dhcps = NULL;
+static struct udp_pcb *pcb_dhcpr = NULL;
 static struct ip_addr broadcast_dhcps;
 static struct ip_addr server_address;
 static struct ip_addr client_address;//added
@@ -317,7 +318,9 @@ static void ICACHE_FLASH_ATTR send_offer(struct dhcps_msg *m)
 					}
 #endif
 	            }
-
+#if DHCPS_DEBUG	            
+		    os_printf("\n");
+#endif
 	            q = q->next;
 	        }
 	    }else{
@@ -383,7 +386,9 @@ static void ICACHE_FLASH_ATTR send_nak(struct dhcps_msg *m)
 					}
 #endif
 	            }
-
+#if DHCPS_DEBUG	            
+		    os_printf("\n");
+#endif
 	            q = q->next;
 	        }
 	    }else{
@@ -450,7 +455,9 @@ static void ICACHE_FLASH_ATTR send_ack(struct dhcps_msg *m)
 					}
 #endif
 	            }
-
+#if DHCPS_DEBUG	            
+		    os_printf("\n");
+#endif
 	            q = q->next;
 	        }
 	    }else{
@@ -472,6 +479,87 @@ static void ICACHE_FLASH_ATTR send_ack(struct dhcps_msg *m)
 	        pbuf_free(p);
 	    }
 }
+///////////////////////////////////////////////////////////////////////////////////
+/*
+ * ����һ��ACK��DHCP�ͻ���
+ *
+ * @param m ָ����Ҫ���͵�DHCP msg����
+ */
+///////////////////////////////////////////////////////////////////////////////////
+static void ICACHE_FLASH_ATTR forward_request(struct dhcps_msg *m)
+{
+	    struct pbuf *p, *q;
+	    u8_t *data;
+	    u16_t cnt=0;
+	    u16_t i;
+	    struct ip_addr ipadd;
+	    struct netif *if0 =(struct netif *)eagle_lwip_getif(0x00);
+            
+            ipadd.addr = *( (uint32_t *) &server_address);
+		err_t SendAck_err_t;
+		os_memcpy( (char *)m->giaddr, (char *) &ipadd.addr, sizeof((char *)m->giaddr));
+		
+	    p = pbuf_alloc(PBUF_TRANSPORT, sizeof(struct dhcps_msg), PBUF_RAM);
+#if DHCPS_DEBUG
+	    os_printf("udhcp: forward_request>> server address  = %x %x\n",server_address, (if0->gw).addr );
+	    os_printf("udhcp: forward_request>>p->ref = %d\n", p->ref);
+#endif
+	    if(p != NULL){
+	        
+#if DHCPS_DEBUG
+	        os_printf("dhcps: forward_request>>pbuf_alloc succeed\n");
+	        os_printf("dhcps: forward_request>>p->tot_len = %d\n", p->tot_len);
+	        os_printf("dhcps: forward_request>>p->len = %d\n", p->len);
+#endif
+	        q = p;
+	        while(q != NULL){
+	            data = (u8_t *)q->payload;
+	            for(i=0; i<q->len; i++)
+	            {
+	                data[i] = ((u8_t *) m)[cnt++];
+#if DHCPS_DEBUG					
+					os_printf("%02x ",data[i]);
+					if((i+1)%16 == 0){
+						os_printf("\n");
+					}
+#endif
+	            }
+#if DHCPS_DEBUG	            
+		    os_printf("\n");
+#endif
+	       
+		    q = q->next;
+	        }
+	    }else{
+	    
+#if DHCPS_DEBUG
+	        os_printf("dhcps: forward_request>>pbuf_alloc failed\n");
+#endif
+	        return;
+	    }
+	    int local =0;
+
+	    if (m->op == DHCP_REPLY) 
+	    {
+	      SendAck_err_t = udp_sendto( pcb_dhcpr, p, &broadcast_dhcps, DHCPS_CLIENT_PORT );
+	      local =1;
+	    }  
+	    else
+	    {
+	    SendAck_err_t = udp_sendto_if( pcb_dhcpr, p , &(if0->gw), DHCPS_SERVER_PORT, if0 );	    
+	    }
+//#if DHCPS_DEBUG
+	        os_printf("dhcps: forward_request>>udp_sendto local %x result %x\n",local, SendAck_err_t);
+//#endif
+	    
+	      if(p->ref != 0){
+#if DHCPS_DEBUGr
+	        os_printf("udhcp: send_ack>>free pbuf\n");
+#endif
+	        pbuf_free(p);
+	    }
+}
+
 ///////////////////////////////////////////////////////////////////////////////////
 /*
  * ����DHCP�ͻ��˷�����DHCP����������Ϣ�����Բ�ͬ��DHCP��������������Ӧ��Ӧ��
@@ -742,28 +830,33 @@ static sint16_t ICACHE_FLASH_ATTR parse_msg(struct dhcps_msg *m, u16_t len)
  */
 ///////////////////////////////////////////////////////////////////////////////////
 static void ICACHE_FLASH_ATTR handle_dhcp(void *arg, 
-									struct udp_pcb *pcb, 
-									struct pbuf *p, 
-									struct ip_addr *addr, 
-									uint16_t port)
+					  struct udp_pcb *pcb, 
+					  struct pbuf *p, 
+					  struct ip_addr *addr, 
+					  uint16_t port)
 {
 		struct dhcps_msg *pmsg_dhcps = NULL;
+		struct dhcps_msg *pmsg_dhcpr = NULL;
 		sint16_t tlen = 0;
         u16_t i = 0;
 	    u16_t dhcps_msg_cnt = 0;
 	    u8_t *p_dhcps_msg = NULL;
+	    u8_t *p_dhcpr_msg = NULL;	    
 	    u8_t *data = NULL;
 
-#if DHCPS_DEBUG
-    	os_printf("dhcps: handle_dhcp-> receive a packet\n");
-#endif
+//#if DHCPS_DEBUG
+    	os_printf("dhcps: handle_dhcp-> receive a packet %x %x\n", *addr, port);
+//#endif
 	    if (p==NULL) return;
 
+	    pmsg_dhcpr = (struct dhcps_msg *)os_zalloc(sizeof(struct dhcps_msg));
 	    pmsg_dhcps = (struct dhcps_msg *)os_zalloc(sizeof(struct dhcps_msg));
 	    if (NULL == pmsg_dhcps){
 	    	pbuf_free(p);
 	    	return;
 	    }
+	    
+	    p_dhcpr_msg = (u8_t *)pmsg_dhcpr;
 	    p_dhcps_msg = (u8_t *)pmsg_dhcps;
 		tlen = p->tot_len;
 	    data = p->payload;
@@ -774,6 +867,7 @@ static void ICACHE_FLASH_ATTR handle_dhcp(void *arg,
 #endif		
 
 	    for(i=0; i<p->len; i++){
+	      	p_dhcpr_msg[dhcps_msg_cnt] = data[i];
 	        p_dhcps_msg[dhcps_msg_cnt++] = data[i];
 #if DHCPS_DEBUG					
 			os_printf("%02x ",data[i]);
@@ -782,7 +876,9 @@ static void ICACHE_FLASH_ATTR handle_dhcp(void *arg,
 			}
 #endif
 	    }
-		
+#if DHCPS_DEBUG	            
+		    os_printf("\n");
+#endif
 		if(p->next != NULL) {
 #if DHCPS_DEBUG
 	        os_printf("dhcps: handle_dhcp-> p->next != NULL\n");
@@ -792,6 +888,7 @@ static void ICACHE_FLASH_ATTR handle_dhcp(void *arg,
 			
 	        data = p->next->payload;
 	        for(i=0; i<p->next->len; i++){
+	            p_dhcpr_msg[dhcps_msg_cnt] = data[i];
 	            p_dhcps_msg[dhcps_msg_cnt++] = data[i];
 #if DHCPS_DEBUG					
 				os_printf("%02x ",data[i]);
@@ -800,8 +897,17 @@ static void ICACHE_FLASH_ATTR handle_dhcp(void *arg,
 				}
 #endif
 			}
+#if DHCPS_DEBUG	            
+			os_printf("\n");
+#endif
 		}
-
+	struct netif* if0 = (struct netif *)eagle_lwip_getif(0x00);	
+	struct netif* if1 = (struct netif *)eagle_lwip_getif(0x01);	
+	if (ip_addr_netcmp(&(if0->ip_addr),
+	  &(if1->ip_addr), &(if0->netmask))) {	
+                forward_request(pmsg_dhcpr);
+	}
+	else {	 
 		/*
 	     * DHCP �ͻ���������Ϣ����
 	    */
@@ -832,6 +938,8 @@ static void ICACHE_FLASH_ATTR handle_dhcp(void *arg,
 			default :
 				 break;
         }
+	}
+        
 #if DHCPS_DEBUG
     	os_printf("dhcps: handle_dhcp-> pbuf_free(p)\n");
 #endif
@@ -886,17 +994,20 @@ static void ICACHE_FLASH_ATTR wifi_softap_init_dhcps_lease(uint32 ip)
 void ICACHE_FLASH_ATTR dhcps_start(struct ip_info *info)
 {
 	struct netif * apnetif = (struct netif *)eagle_lwip_getif(0x01);
+	struct netif * snetif = (struct netif *)eagle_lwip_getif(0x00);
     
 	if(apnetif->dhcps_pcb != NULL) {
         udp_remove(apnetif->dhcps_pcb);
     }
 
 	pcb_dhcps = udp_new();
+	pcb_dhcpr = udp_new();
 	if (pcb_dhcps == NULL || info ==NULL) {
 		os_printf("dhcps_start(): could not obtain pcb\n");
 	}
 
 	apnetif->dhcps_pcb = pcb_dhcps;
+	snetif->dhcps_pcb = pcb_dhcpr;	
 
 	IP4_ADDR(&broadcast_dhcps, 255, 255, 255, 255);
 

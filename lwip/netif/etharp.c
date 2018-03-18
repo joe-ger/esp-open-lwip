@@ -193,9 +193,9 @@ free_entry(int i)
 #ifdef LWIP_DEBUG
   /* for debugging, clean out the complete entry */
   arp_table[i].ctime = 0;
-#if LWIP_SNMP
+//#if LWIP_SNMP
   arp_table[i].netif = NULL;
-#endif /* LWIP_SNMP */
+//#endif /* LWIP_SNMP */
   ip_addr_set_zero(&arp_table[i].ipaddr);
   arp_table[i].ethaddr = ethzero;
 #endif /* LWIP_DEBUG */
@@ -485,10 +485,11 @@ update_arp_entry(struct netif *netif, ip_addr_t *ipaddr, struct eth_addr *ethadd
   /* mark it stable */
   arp_table[i].state = ETHARP_STATE_STABLE;
 
-#if LWIP_SNMP
+//#if LWIP_SNMP
   /* record network interface */
-  arp_table[i].netif = netif;
-#endif /* LWIP_SNMP */
+    arp_table[i].netif = netif;
+//#endif /* LWIP_SNMP */
+  
   /* insert in SNMP ARP index tree */
   snmp_insert_arpidx_tree(netif, &arp_table[i].ipaddr);
 
@@ -621,7 +622,14 @@ etharp_find_addr(struct netif *netif, ip_addr_t *ipaddr,
   LWIP_UNUSED_ARG(netif);
 
   i = find_entry(ipaddr, ETHARP_FLAG_FIND_ONLY);
-  if((i >= 0) && (arp_table[i].state >= ETHARP_STATE_STABLE)) {
+  if ((arp_table[i].netif == netif))
+  {
+////      os_printf("etharp_find_addr wrong  interface\n");
+      return -2;
+    
+  }
+  if((i >= 0) && (arp_table[i].state >= ETHARP_STATE_STABLE) ) {
+////      os_printf("etharp_find_addr\n");
       *eth_ret = &arp_table[i].ethaddr;
       *ip_ret = &arp_table[i].ipaddr;
       return i;
@@ -701,7 +709,11 @@ etharp_arp_input(struct netif *netif, struct eth_addr *ethaddr, struct pbuf *p)
   struct eth_hdr *ethhdr;
   /* these are aligned properly, whereas the ARP header fields might not be */
   ip_addr_t sipaddr, dipaddr;
+  struct netif *netif1 = (struct netif *)eagle_lwip_getif(0);
+  if (netif == netif1)
+    netif1 = (struct netif *)eagle_lwip_getif(1);
   u8_t for_us;
+  u8_t for_proxy;
 #if LWIP_AUTOIP
   const u8_t * ethdst_hwaddr;
 #endif /* LWIP_AUTOIP */
@@ -762,9 +774,11 @@ etharp_arp_input(struct netif *netif, struct eth_addr *ethaddr, struct pbuf *p)
   /* this interface is not configured? */
   if (ip_addr_isany(&netif->ip_addr)) {
     for_us = 0;
+    for_proxy = 0;
   } else {
     /* ARP packet directed to us? */
     for_us = (u8_t)ip_addr_cmp(&dipaddr, &(netif->ip_addr));
+    for_proxy = (u8_t)ip_addr_netcmp(&dipaddr, &(netif1->ip_addr), &(netif1->netmask));
   }
 
   /* ARP message directed to us?
@@ -838,6 +852,49 @@ etharp_arp_input(struct netif *netif, struct eth_addr *ethaddr, struct pbuf *p)
       netif->linkoutput(netif, p);
 #endif /* ESF_LWIP */
     /* we are not configured? */
+    } else if (for_proxy) {
+	ip_addr_t ip_return;
+        ip_addr_t *ip_ret = &ip_return;
+    hdr->opcode = htons(ARP_REPLY);
+    IPADDR2_COPY(&hdr->dipaddr, &hdr->sipaddr);
+    IPADDR2_COPY(&hdr->sipaddr, &dipaddr);      
+
+    ETHADDR16_COPY(&hdr->dhwaddr, &hdr->shwaddr);
+    ETHADDR16_COPY(&ethhdr->dest, &hdr->shwaddr);
+    ETHADDR16_COPY(&hdr->shwaddr, ethaddr);
+    ETHADDR16_COPY(&ethhdr->src, ethaddr);
+ 
+    int found = etharp_find_addr( netif, &dipaddr,&ethaddr, &ip_ret); 
+    if (found >= 0)
+    {
+#ifdef EBUF_LWIP
+      /*
+       *   don't do flip-flop here... do a copy here.
+       *    otherwise, we need to handle existing pbuf->eb in ieee80211_output.c
+       */
+	  q = pbuf_alloc(PBUF_RAW, p->tot_len, PBUF_RAM);
+	  if (q != NULL) {
+	    pbuf_copy(q, p);
+          //pbuf_free(p);
+	  } else {
+	    LWIP_ASSERT("q != NULL", q != NULL);
+	  }
+	  err_t result= netif->linkoutput(netif, q);
+	  pbuf_free(q);
+#else
+	  netif->linkoutput(netif, p);
+#endif /* ESF_LWIP */
+      }
+      else
+      {
+	if (found == -1)
+	{
+	  etharp_query(netif1, &dipaddr, NULL);
+	  if (etharp_query(netif1, &dipaddr, p) != ERR_OK)
+	  {
+	  }
+	}
+      }
     } else if (ip_addr_isany(&netif->ip_addr)) {
       /* { for_us == 0 and netif->ip_addr.addr == 0 } */
       LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_arp_input: we are unconfigured, ARP request ignored.\n"));
@@ -969,6 +1026,7 @@ etharp_output(struct netif *netif, struct pbuf *q, ip_addr_t *ipaddr)
         }
       }
     }
+	
 #if LWIP_NETIF_HWADDRHINT
     if (netif->addr_hint != NULL) {
       /* per-pcb cached entry was given */
@@ -1099,6 +1157,8 @@ etharp_query(struct netif *netif, ip_addr_t *ipaddr, struct pbuf *q)
     ETHARP_SET_HINT(netif, i);
     /* send the packet */
     result = etharp_send_ip(netif, q, srcaddr, &(arp_table[i].ethaddr));
+    if (result == ERR_OK)
+      arp_table[i].netif = netif;
   /* pending entry? (either just created or already pending */
   } else if (arp_table[i].state == ETHARP_STATE_PENDING) {
     /* entry is still pending, queue the given packet 'q' */

@@ -803,7 +803,7 @@
  * LWIP_MDNS==1: Turn on MDNS module.
  */
 #ifndef LWIP_MDNS
-#define LWIP_MDNS                      1
+#define LWIP_MDNS                      0
 #endif
 /*
 /*
