@@ -778,7 +778,7 @@ etharp_arp_input(struct netif *netif, struct eth_addr *ethaddr, struct pbuf *p)
   } else {
     /* ARP packet directed to us? */
     for_us = (u8_t)ip_addr_cmp(&dipaddr, &(netif->ip_addr));
-    for_proxy = (u8_t)ip_addr_netcmp(&dipaddr, &(netif1->ip_addr), &(netif1->netmask));
+    for_proxy = (u8_t)(ip_addr_netcmp(&dipaddr, &(netif1->ip_addr), &(netif1->netmask)) && ip_addr_netcmp(&(netif->ip_addr), &(netif1->ip_addr), &(netif1->netmask)));
   }
 
   /* ARP message directed to us?
